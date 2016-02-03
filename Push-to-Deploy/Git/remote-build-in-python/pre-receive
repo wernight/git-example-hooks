@@ -1,0 +1,112 @@
+#!/usr/bin/env python
+"""
+Git pre-receive hook.
+
+Python script that will checkout the current commit to a remote Linux machine using ssh and run a "./build" script there.
+
+  * Only affects commits to the "master" branch.
+  * If build fails (or anything fails), the commit will not get pushed.
+  * Build's script output are shown in Git outputs during the push.
+  * Works on a Git bare repository.
+  * Runs "chgrp -R $GROUP" on the files on the remote repository (so that anyone within the group can Git push).
+
+This is useful for example to avoid some branch to ever get broken and/or to deploy on push on a remote machine.
+
+
+Usage:
+
+  1. Install Python 2 or 3
+  2. Install [fabric](http://www.fabfile.org/) Python package
+  3. Copy this script to a Git repository `hooks` directory (mark is as executable).
+
+Example or manual usage:
+
+    $ cd my-project.git
+    $ echo "master master refs/heads/master" | hooks/pre-receive
+"""
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from fabric.api import hosts, run, cd, execute, local, prefix, path
+from fabric.colors import white
+
+__author__ = 'Werner Beroux <werner@beroux.com>'
+
+# User and host of the remote machine to SSH into.
+REMOTE_HOST = 'user@example.com'
+
+# Linux group that should exist on the remote machine.
+GROUP = 'user'
+
+# Additional PATH directory that may be necessary on the remote machine.
+EXTRA_PATH = '/home/user/.virtualenvs/docker/bin'
+
+
+def onPreReceive(oldrev, newrev, refname):
+    # The value in `oldrev` will be 0000000000000000000000000000000000000000 if the reference name `refname` is being proposed to be created.
+    # The value in `newrev` will be 0000000000000000000000000000000000000000 if the reference name `refname` is being proposed to be deleted.
+    # The values of both will be nonzero if the reference name `refname` is being proposed to be updated,
+    # i.e., it currently points to git object `oldrev` and if you allow the change, it will point to new object `newsha` instead.
+
+    # Only run this script for the master branch. You can remove this 
+    # if block if you wish to run it for others as well.
+    if refname != 'refs/heads/master':
+        sys.exit(0)
+
+    execute(build_and_deploy, newrev, host=REMOTE_HOST)
+
+
+def build_and_deploy(sha1='master'):
+    # We build in a directory named after the project.
+    # It may affect some Docker containers names for example.
+    project_name = os.path.basename(os.getcwd())
+    if project_name.endswith('.git'):
+        project_name = project_name[:-4]
+
+    # Since the repo is bare, we need to put the actual files someplace, 
+    # so we use the temp dir we chose earlier
+    printStatus('Checking out commit {}'.format(sha1))
+    tmp_dir = os.path.join('/tmp', project_name)
+    if not os.path.exists(tmp_dir):
+        os.mkdir(tmp_dir)
+        local('chmod g+s {}'.format(tmp_dir))
+        local('chgrp {} {}'.format(GROUP, tmp_dir))
+    local('GIT_WORK_TREE={} git checkout -f {}'.format(tmp_dir, sha1))
+    local('GIT_WORK_TREE={} git reset --hard'.format(tmp_dir))
+    local('GIT_WORK_TREE={} git clean -dfx'.format(tmp_dir))
+
+    local('rsync -az --delete {tmp_dir}/ {host}:{remote_dir}'.format(
+        tmp_dir=tmp_dir,
+        host=REMOTE_HOST,
+        remote_dir=project_name))
+
+    with path(EXTRA_PATH), cd(project_name):
+        printStatus('Running build')
+        run('./build')
+
+
+def printStatus(msg):
+    print('')
+    print(white('-----> {} ... '.format(msg), bold=True))
+    sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('oldrev', help='old object name stored in the ref')
+    parser.add_argument('newrev', help='new object name stored in the ref')
+    parser.add_argument('refname', help='full name of the ref')
+
+    for line in sys.stdin:
+        try:
+            args = parser.parse_args(line.strip().split(' '))
+            onPreReceive(args.oldrev, args.newrev, args.refname)
+        except IOError as ex:
+            # May happen for type=file arguments if the user gives a non-existing file path.
+            sys.stderr.write(str(ex) + '\n')
+            sys.exit(1)
+        except subprocess.CalledProcessError as ex:
+            sys.stderr.write(str(ex) + '\n')
+            sys.exit(ex.returncode)

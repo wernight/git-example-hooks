@@ -1,0 +1,59 @@
+#!/bin/bash
+#
+# Bash script that will checkout the current commit to a remote Linux machine using ssh and run a "./build" script there.
+#
+#  - Only affects commits to the "master" branch.
+#  - If build fails (or anything fails), the commit will not get pushed.
+#  - Build's script output are shown in Git outputs during the push.
+#  - Works on a Git bare repository.
+#
+# This is useful for example to avoid some branch to ever get broken and/or to deploy on push on a remote machine.
+#
+# Author: Werner Beroux <werner@beroux.com>
+
+project_name=${PWD##*/}
+project_name=${project_name%.git}
+
+tmp_dir=/dev/shm/$project_name
+remote_host=user@example.com
+remote_dir=$project_name
+
+# The value in $oldsha will be 0000000000000000000000000000000000000000 if the reference name $refname is being proposed to be created.
+# The value in $newsha will be 0000000000000000000000000000000000000000 if the reference name $refname is being proposed to be deleted.
+# The values of both will be nonzero if the reference name $refname is being proposed to be updated,
+# i.e., it currently points to git object $oldsha, and if you allow the change, it will point to new object $newsha instead.
+while read oldrev newrev refname
+do
+    # Only run this script for the master branch. You can remove this 
+    # if block if you wish to run it for others as well.
+    if [[ $refname = "refs/heads/master" ]] ; then
+        # Since the repo is bare, we need to put the actual files someplace, 
+        # so we use the temp dir we chose earlier
+        echo "-----> Checking out commit $newrev ... "
+        if [[ -e $tmp_dir ]]
+        then
+            rm -rf $tmp_dir
+        fi
+        mkdir $tmp_dir
+        git archive $newrev | tar -x -C $tmp_dir
+        rsync -az --delete $tmp_dir/ $remote_host:$remote_dir
+        rc=$?
+        if [[ $rc != 0 ]] ; then
+            echo "rsync failed - push deniend."
+            exit $rc
+        fi
+        rm -rf $tmp_dir
+ 
+        echo "-----> Running build ... "
+        ssh $remote_host "cd $remote_dir && ./build"
+        rc=$?
+        if [[ $rc != 0 ]] ; then
+            echo "Build failed on rev $newrev - push deniend."
+            exit $rc
+        fi
+    fi
+done
+ 
+# Everything went OK so we can exit with a zero
+exit 0
+

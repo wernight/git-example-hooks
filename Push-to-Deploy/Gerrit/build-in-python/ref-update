@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Python script that will checkout the current commit to a temporary directory and run a "./build" followed by "./deploy" script there if those scripts are present in the repository.
+
+  * Only affects commits to the "master" branch which have a "./build" and "./deploy" file.
+  * If build fails (or anything fails), the commit will not get pushed.
+  * Build's script output are shown in Git outputs.
+
+This is useful for example to avoid some branch to ever get broken and/or to deploy on push.
+
+
+Usage:
+
+ 1. Install Python 3 (should also work with Python 2).
+ 2. Copy to Gerrit's `hooks` directory.
+ 3. You may want to change `hooks.syncHookTimeout` in your config to a larger value than 30 seconds,
+    and `receive.timeout` too (default is `2 min`).
+
+CLI syntax (see: https://gerrit-review.googlesource.com/Documentation/config-hooks.html#_ref_update):
+
+    $ ref-update --project <project name> --refname <refname> --uploader <uploader> --oldrev <sha1> --newrev <sha1>
+
+"""
+
+__author__ = 'Werner Beroux <werner@beroux.com>'
+
+import argparse
+import os
+import socket
+import subprocess
+import sys
+
+BUILD_DIR = '/tmp'
+TEMP_BRANCH_NAME = 'build.tmp'
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Run ./build when present.')
+    parser.add_argument('--project', metavar='PROJECT_NAME')  # project/name.git
+    parser.add_argument('--refname', required=True)  # refs/heads/master
+    parser.add_argument('--uploader', required=True)  # Werner Beroux (werner@beroux.com)
+    parser.add_argument('--oldrev', metavar='SHA1', required=True)
+    parser.add_argument('--newrev', metavar='SHA1', required=True)
+    args = parser.parse_args()
+
+    gerrit_site = os.environ['GERRIT_SITE']  # /opt/gerrit
+    gerrit_tmp = os.environ['GERRIT_TMP']  # /opt/gerrit/tmp
+    git_dir = os.environ['GIT_DIR']  # /home/git/project/name.git
+
+    # Only for pushes to master.
+    if args.refname != 'refs/heads/master':
+        print('Slipping build: Not pushed to master branch.')
+        sys.exit(0)
+
+    # Check if there is a 'build' file.
+    try:
+        subprocess.check_output(['git', 'show', args.newrev + ':build'], cwd=git_dir)
+    except subprocess.CalledProcessError:
+        print('Skipping build: No build file found.')
+        sys.exit(0)
+
+    # Check if there is a 'deploy' file.
+    try:
+        subprocess.check_output(['git', 'show', args.newrev + ':deploy'], cwd=git_dir)
+    except subprocess.CalledProcessError:
+        print('Skipping build: No deploy file found.')
+        sys.exit(0)
+
+    print('Build:')
+
+    # Checkout the project and execute the build.
+    print('-----> Checking out project')
+    sys.stdout.flush()
+    project_build_dir = os.path.join(BUILD_DIR, 'build', args.project)
+    safe_env = {
+        'HOME': BUILD_DIR,
+    }
+    deploy_domain = socket.gethostname()
+    remote_project_dir_name = os.path.basename(args.project)
+
+    try:
+        # If there is no cloned repository (of this bare repository),
+        if not os.path.exists(project_build_dir):
+            subprocess.check_call(['git', 'clone', '--recursive', git_dir, project_build_dir], env=safe_env)
+        else:
+            # Update the cloned repository to contain this detached HEAD commit.
+            repository = project_build_dir
+            subprocess.check_call(['git', 'push', repository, '+{}:refs/remotes/origin/master'.format(args.newrev)], cwd=git_dir, env=safe_env)
+
+        # Checkout current commit in that cloned repository (and display current HEAD).
+        subprocess.check_call(['git', 'checkout', '-q', args.newrev], cwd=project_build_dir, env=safe_env)
+        subprocess.check_call(['git', 'show-ref', 'HEAD'], cwd=project_build_dir, env=safe_env)
+    except subprocess.CalledProcessError as ex:
+        sys.stderr.write(str(ex) + '\n')
+        sys.stderr.write('!!! Checkout Failed !!!!\n')
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(1)
+
+    # Create a virtualenv for the project.
+    print('-----> Run build script')
+    sys.stdout.flush()
+    try:
+        # Run build script.
+        subprocess.check_call(['./build'], cwd=project_build_dir, env=safe_env)
+        subprocess.check_call(['./deploy'], cwd=project_build_dir, env=safe_env)
+    except subprocess.CalledProcessError as ex:
+        sys.stderr.write(str(ex) + '\n')
+        sys.stderr.write('!!! Build Failed !!!!\n')
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(1)
+
+    print('-----> Deployed successfully on {}'.format(deploy_domain))
+    sys.stdout.flush()

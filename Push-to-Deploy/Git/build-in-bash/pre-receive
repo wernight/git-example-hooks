@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# Bash script that will run a "./build" followed by a "./deploy" script for incoming commits.
+#
+#  - Works on a Git bare repository.
+#  - Only affects commits to the "master" branch.
+#  - If build fails (or anything fails), the commit will not get pushed.
+#  - Build's script output are shown in Git outputs during the push.
+#
+# This is useful for example to avoid some branch to ever get broken and/or to deploy on push.
+#
+# Author: Werner Beroux <werner@beroux.com>
+
+tmp_dir=/dev/shm/${PWD##*/}
+
+# The value in $oldsha will be 0000000000000000000000000000000000000000 if the reference name $refname is being proposed to be created.
+# The value in $newsha will be 0000000000000000000000000000000000000000 if the reference name $refname is being proposed to be deleted.
+# The values of both will be nonzero if the reference name $refname is being proposed to be updated,
+# i.e., it currently points to git object $oldsha, and if you allow the change, it will point to new object $newsha instead.
+while read oldrev newrev refname
+do
+    # Only run this script for the master branch. You can remove this 
+    # if block if you wish to run it for others as well.
+    if [[ $refname = "refs/heads/master" ]]; then
+        # Since the repo is bare, we need to put the actual files someplace, 
+        # so we use the temp dir we chose earlier
+        echo "-----> Checking out commit $newrev ... "
+        if [[ -e $tmp_dir ]]; then
+            rm -rf $tmp_dir
+        fi
+        mkdir $tmp_dir
+        git archive $newrev | tar -x -C $tmp_dir
+ 
+        pushd $tmp_dir
+
+        echo "-----> Running build ... "
+        ./build
+        rc=$?
+        if [[ $rc != 0 ]]; then
+            echo "Build failed on rev $newrev - push denied."
+            exit $rc
+        fi
+
+        echo "-----> Running deploy ... "
+        ./deploy
+        rc=$?
+        if [[ $rc != 0 ]]; then
+            echo "Deployment failed on rev $newrev - push denied."
+            exit $rc
+        fi
+
+        rm -rf $tmp_dir
+    fi
+done
+ 
+# Everything went OK so we can exit with a zero
+exit 0
+
